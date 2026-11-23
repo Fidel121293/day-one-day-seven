@@ -1,295 +1,335 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Neon Dash — Day 7 build</title>
+<title>Neon Dash — Day 7</title>
 <style>
-  html, body { margin: 0; padding: 0; background: #0d0221; }
+  html, body { margin: 0; padding: 0; background: #000; }
   canvas { display: block; }
 </style>
 </head>
 <body>
-<canvas id="game" width="1080" height="1920"></canvas>
+<canvas id="view" width="1080" height="1920"></canvas>
 <script>
 'use strict';
-// NEON DASH — day 7 build.
-// Same track, same seed, same autopilot inputs as the day 1 build (the world
-// generation and jump physics below are identical), with a week of daily
-// updates on top: gradient sunset sky, parallax city, neon grid ground,
-// glow + trail on the player, coins with particle bursts, landing dust,
-// screen shake and a proper HUD. Still a pure function of elapsed time.
+/*
+ * Neon Dash, day 7: a week of updates on top of the day-1 build.
+ * The course itself never changed — same seed, same 26 blocks, same
+ * scripted jumps — what changed is everything around it: a night sky
+ * with parallax towers, a coin line worth chasing, landing sparks, a
+ * glowing runner and a real HUD.
+ *
+ * Like day 1, every frame is a pure function of the offset passed to
+ * window.renderAt(ms). No wall clock, no Math.random at draw time;
+ * even the particles are derived from the jump schedule, so any frame
+ * can be reproduced exactly.
+ */
 
-var W = 1080, H = 1920;
-var GROUND_Y = 1560;          // top edge of the ground
-var PLAYER_X = 250, PLAYER = 92;
-var SPEED = 640;              // px per second, world scroll
-var JUMP_D = 0.66, JUMP_H = 300;
+// ---------- shared world model (unchanged since day 1) ----------
+var VIEW_W = 1080, VIEW_H = 1920;
+var GROUND_Y = 1560;              // y of the track surface
+var RUN_SPEED = 520;              // pixels per second
+var HERO_X = 300, HERO_W = 64, HERO_H = 92;
 
+// Small deterministic PRNG (mulberry32) so the course is built once,
+// identically, on every load.
 function mulberry32(seed) {
   var a = seed >>> 0;
   return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    a = (a + 0x6D2B79F5) | 0;
     var t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-// ---- world generation (shared verbatim with the day 1 build) ----
-var obstacles = [];
-var jumpTimes = [];
-(function buildWorld() {
-  var rng = mulberry32(1337);
-  var x = 1500;
+var dice = mulberry32(1337);
+
+// The course: 26 blocks. Positions and sizes come from the seeded dice.
+var blocks = [];
+(function buildCourse() {
+  var cursor = 1500;
   for (var i = 0; i < 26; i++) {
-    var h = 96 + rng() * 70;
-    obstacles.push({ x: x, w: 84, h: h });
-    jumpTimes.push((x - (PLAYER_X + PLAYER + 300)) / SPEED);
-    x += 760 + rng() * 420;
+    blocks.push({
+      x: cursor,
+      w: 46 + Math.floor(dice() * 26),
+      h: 44 + Math.floor(dice() * 66)
+    });
+    cursor += 400 + Math.floor(dice() * 240);
   }
 })();
 
-function jumpOffset(t) {
-  for (var i = 0; i < jumpTimes.length; i++) {
-    var s = (t - jumpTimes[i]) / JUMP_D;
-    if (s >= 0 && s <= 1) return 4 * JUMP_H * s * (1 - s);
+// Coin line: laid out from the same dice stream, right after the blocks.
+var coinLine = [];
+for (var ci = 0; ci < 34; ci++) {
+  coinLine.push({
+    x: 900 + ci * 185 + Math.floor(dice() * 70),
+    y: GROUND_Y - 150 - Math.floor(dice() * 160)
+  });
+}
+
+// Scripted jumps: the runner leaves the ground a fixed lead distance
+// before each block, so the same run clears the same blocks every time.
+var JUMP_MS = 640, JUMP_TOP = 250, JUMP_LEAD = 170;
+var jumpStarts = blocks.map(function (b) {
+  return (b.x - HERO_X - HERO_W - JUMP_LEAD) / RUN_SPEED * 1000;
+});
+
+function jumpHeightAt(t) {
+  for (var i = 0; i < jumpStarts.length; i++) {
+    var p = (t - jumpStarts[i]) / JUMP_MS;
+    if (p >= 0 && p <= 1) {
+      var q = 2 * p - 1;
+      return JUMP_TOP * (1 - q * q);
+    }
   }
   return 0;
 }
 
-// ---- day 7 additions: coins, collect events, city layers ----
-var coins = [];
-var collectTimes = [];
-(function buildCoins() {
-  for (var i = 0; i < obstacles.length - 1; i++) {
-    var cx = obstacles[i].x + 430;               // mid-gap, on the jump arc
-    coins.push({ x: cx, y: GROUND_Y - 300 });
-    collectTimes.push((cx - (PLAYER_X + PLAYER / 2)) / SPEED);
-  }
-})();
+function scrolledAt(t) { return RUN_SPEED * t / 1000; }
 
-function makeCity(seed, count, minH, maxH) {
-  var rng = mulberry32(seed);
-  var layer = [], x = 0;
+// A coin counts as collected once its crossing moment has passed while
+// the runner's body overlapped the coin's height.
+function coinCollected(coin, t) {
+  var crossing = (coin.x - HERO_X - HERO_W / 2) / RUN_SPEED * 1000;
+  if (t < crossing) return false;
+  var feet = GROUND_Y - jumpHeightAt(crossing);
+  return coin.y > feet - HERO_H - 34 && coin.y < feet + 34;
+}
+
+// ---------- day 7 dressing, also generated from the dice ----------
+var starField = [];
+for (var si = 0; si < 90; si++) {
+  starField.push({
+    x: Math.floor(dice() * VIEW_W),
+    y: Math.floor(dice() * 900),
+    r: 1 + dice() * 2
+  });
+}
+
+function makeSkyline(count, hMin, hMax) {
+  var towers = [], x = 0;
   for (var i = 0; i < count; i++) {
-    var w = 120 + rng() * 150, h = minH + rng() * (maxH - minH);
-    layer.push({ x: x, w: w, h: h, seed: rng() * 1000 });
-    x += w + 14;
+    var w = 90 + Math.floor(dice() * 130);
+    towers.push({ x: x, w: w, h: hMin + Math.floor(dice() * (hMax - hMin)) });
+    x += w + 8 + Math.floor(dice() * 30);
   }
-  return { buildings: layer, span: x };
+  return { towers: towers, span: x };
 }
-var cityFar = makeCity(77, 14, 260, 620);
-var cityNear = makeCity(99, 12, 380, 880);
+var farSkyline = makeSkyline(26, 240, 520);
+var nearSkyline = makeSkyline(26, 380, 760);
 
-var ctx = document.getElementById('game').getContext('2d');
-
-function drawCity(layer, par, color, t) {
-  var off = (SPEED * t * par) % layer.span;
-  ctx.fillStyle = color;
-  for (var k = -1; k < 2; k++) {
-    for (var i = 0; i < layer.buildings.length; i++) {
-      var b = layer.buildings[i];
-      var bx = b.x - off + k * layer.span;
-      if (bx + b.w < 0 || bx > W) continue;
-      ctx.fillRect(bx, GROUND_Y - b.h, b.w, b.h);
-    }
-  }
+// Cheap stable hash for window lights and particle spreads.
+function hash01(n) {
+  var s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+  return s - Math.floor(s);
 }
 
-function drawWindows(layer, par, t) {
-  var off = (SPEED * t * par) % layer.span;
-  for (var k = -1; k < 2; k++) {
-    for (var i = 0; i < layer.buildings.length; i++) {
-      var b = layer.buildings[i];
-      var bx = b.x - off + k * layer.span;
-      if (bx + b.w < 0 || bx > W) continue;
-      for (var r = 0; r < 5; r++) {
-        for (var c = 0; c < 3; c++) {
-          var hsh = Math.sin(b.seed + r * 37.7 + c * 91.3) * 43758.5453;
-          if (hsh - Math.floor(hsh) < 0.42) continue;   // most windows dark
-          ctx.fillStyle = 'rgba(255, 214, 130, 0.85)';
-          ctx.fillRect(bx + 18 + c * 34, GROUND_Y - b.h + 26 + r * 52, 14, 20);
+// ---------- rendering ----------
+var ctx = document.getElementById('view').getContext('2d');
+
+function paintSkyline(sky, offset, colour, litWindows) {
+  var shift = -(offset % sky.span);
+  var rep, i, b, sx;
+  ctx.fillStyle = colour;
+  for (rep = 0; rep < 3; rep++) {
+    for (i = 0; i < sky.towers.length; i++) {
+      b = sky.towers[i];
+      sx = b.x + shift + rep * sky.span;
+      if (sx > VIEW_W || sx + b.w < 0) continue;
+      ctx.fillRect(sx, GROUND_Y - b.h, b.w, b.h);
+      if (!litWindows) continue;
+      for (var r = 0; r < Math.floor(b.h / 64); r++) {
+        for (var c = 0; c < Math.floor(b.w / 34); c++) {
+          if (hash01(b.x * 3 + r * 17 + c * 7) <= 0.55) continue;
+          ctx.fillStyle = 'rgba(250, 204, 21, 0.55)';
+          ctx.fillRect(sx + 10 + c * 34, GROUND_Y - b.h + 14 + r * 64, 11, 15);
+          ctx.fillStyle = colour;
         }
       }
     }
   }
 }
 
-function renderAt(ms) {
-  var t = ms / 1000;
-
-  // screen shake, decaying after each landing
-  var shX = 0, shY = 0;
-  for (var li = 0; li < jumpTimes.length; li++) {
-    var dtl = t - (jumpTimes[li] + JUMP_D);
-    if (dtl > 0 && dtl < 0.3) {
-      var amp = 7 * Math.exp(-dtl * 10);
-      shX = amp * Math.sin(dtl * 70);
-      shY = amp * Math.cos(dtl * 58) * 0.6;
+function paintLandingSparks(t) {
+  for (var i = 0; i < jumpStarts.length; i++) {
+    var age = t - (jumpStarts[i] + JUMP_MS);
+    if (age < 0 || age > 380) continue;
+    var secs = age / 1000;
+    for (var k = 0; k < 12; k++) {
+      var vx = (hash01(i * 31 + k * 7) - 0.5) * 380;
+      var vy = -(110 + hash01(i * 17 + k * 13) * 190);
+      var px = HERO_X + HERO_W / 2 + vx * secs;
+      var py = GROUND_Y + vy * secs + 460 * secs * secs;
+      ctx.globalAlpha = 1 - age / 380;
+      ctx.fillStyle = k % 2 ? '#67e8f9' : '#f0abfc';
+      ctx.fillRect(px - 4, py - 4, 8, 8);
     }
   }
+  ctx.globalAlpha = 1;
+}
+
+function drawFrame(t) {
+  var scrolled = scrolledAt(t);
+  var i, sx;
+
+  // night sky
+  var skyGrad = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+  skyGrad.addColorStop(0, '#070b26');
+  skyGrad.addColorStop(0.6, '#131038');
+  skyGrad.addColorStop(1, '#1d0f33');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+  // twinkling stars (twinkle phase is a function of t, not of a clock)
+  ctx.fillStyle = '#cfe6ff';
+  for (i = 0; i < starField.length; i++) {
+    ctx.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(t / 700 + i * 1.7));
+    ctx.fillRect(starField[i].x, starField[i].y, starField[i].r, starField[i].r);
+  }
+  ctx.globalAlpha = 1;
+
+  // moon with a soft halo
   ctx.save();
-  ctx.translate(shX, shY);
-
-  // sunset gradient sky
-  var sky = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
-  sky.addColorStop(0, '#0d0221');
-  sky.addColorStop(0.55, '#3b0f54');
-  sky.addColorStop(0.85, '#b83280');
-  sky.addColorStop(1, '#ff7e5f');
-  ctx.fillStyle = sky;
-  ctx.fillRect(-20, -20, W + 40, GROUND_Y + 20);
-
-  // sun disc with scanline cuts
-  ctx.fillStyle = '#ffd319';
+  ctx.shadowColor = '#a5b4fc';
+  ctx.shadowBlur = 60;
+  ctx.fillStyle = '#e8ecff';
   ctx.beginPath();
-  ctx.arc(790, GROUND_Y - 430, 190, 0, Math.PI * 2);
+  ctx.arc(880, 250, 62, 0, 7);
   ctx.fill();
-  ctx.fillStyle = '#b83280';
-  for (var s2 = 0; s2 < 4; s2++) {
-    ctx.fillRect(580, GROUND_Y - 430 + 30 + s2 * 42, 420, 7 + s2 * 3);
-  }
-
-  // parallax city
-  drawCity(cityFar, 0.22, '#1b1035', t);
-  drawCity(cityNear, 0.45, '#241447', t);
-  drawWindows(cityNear, 0.45, t);
-
-  // ground: dark slab, neon edge, scrolling grid
-  ctx.fillStyle = '#120826';
-  ctx.fillRect(-20, GROUND_Y, W + 40, H - GROUND_Y + 20);
-  ctx.fillStyle = '#00f5d4';
-  ctx.fillRect(-20, GROUND_Y, W + 40, 5);
-  ctx.strokeStyle = 'rgba(0, 245, 212, 0.28)';
-  ctx.lineWidth = 3;
-  var gridOff = (SPEED * t) % 120;
-  for (var gx = -gridOff; gx < W; gx += 120) {
-    ctx.beginPath();
-    ctx.moveTo(gx, GROUND_Y + 8);
-    ctx.lineTo(gx - 60, H);
-    ctx.stroke();
-  }
-  ctx.strokeStyle = 'rgba(155, 93, 229, 0.35)';
-  for (var gy = GROUND_Y + 90; gy < H; gy += 90) {
-    ctx.beginPath();
-    ctx.moveTo(0, gy);
-    ctx.lineTo(W, gy);
-    ctx.stroke();
-  }
-
-  // obstacles: dark slabs with a magenta neon rim
-  for (var i = 0; i < obstacles.length; i++) {
-    var ox = obstacles[i].x - SPEED * t;
-    if (ox < -140 || ox > W + 140) continue;
-    ctx.fillStyle = '#1d1038';
-    ctx.fillRect(ox, GROUND_Y - obstacles[i].h, obstacles[i].w, obstacles[i].h);
-    ctx.strokeStyle = '#f72585';
-    ctx.lineWidth = 4;
-    ctx.shadowColor = '#f72585';
-    ctx.shadowBlur = 18;
-    ctx.strokeRect(ox, GROUND_Y - obstacles[i].h, obstacles[i].w, obstacles[i].h);
-    ctx.shadowBlur = 0;
-  }
-
-  // coins: spinning gold discs; collected ones burst and vanish
-  var collected = 0;
-  for (var ci = 0; ci < coins.length; ci++) {
-    var ct = collectTimes[ci];
-    var cxp = coins[ci].x - SPEED * t;
-    if (t >= ct) {
-      collected++;
-      var dtc = t - ct;
-      if (dtc < 0.5 && cxp > -80 && cxp < W + 80) {
-        for (var p = 0; p < 10; p++) {
-          var ang = (p / 10) * Math.PI * 2 + ci;
-          var dist = dtc * 260;
-          var px = coins[ci].x - SPEED * ct + Math.cos(ang) * dist;
-          var py2 = coins[ci].y + Math.sin(ang) * dist + dtc * dtc * 300;
-          ctx.fillStyle = 'rgba(255, 209, 25, ' + (1 - dtc * 2) + ')';
-          ctx.beginPath();
-          ctx.arc(px, py2, 7 * (1 - dtc), 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-      continue;
-    }
-    if (cxp < -60 || cxp > W + 60) continue;
-    var squish = Math.abs(Math.cos(t * 5 + ci));
-    ctx.fillStyle = '#ffd319';
-    ctx.shadowColor = '#ffd319';
-    ctx.shadowBlur = 22;
-    ctx.beginPath();
-    ctx.ellipse(cxp, coins[ci].y, 26 * squish + 4, 30, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-  }
-
-  // landing dust
-  for (var di = 0; di < jumpTimes.length; di++) {
-    var dtd = t - (jumpTimes[di] + JUMP_D);
-    if (dtd > 0 && dtd < 0.35) {
-      ctx.fillStyle = 'rgba(0, 245, 212, ' + (0.5 * (1 - dtd / 0.35)) + ')';
-      for (var dp = -1; dp <= 1; dp += 2) {
-        ctx.beginPath();
-        ctx.arc(PLAYER_X + PLAYER / 2 + dp * (40 + dtd * 260), GROUND_Y - 8, 12 + dtd * 30, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
-  }
-
-  // player trail (ghost squares at earlier times)
-  for (var g = 6; g >= 1; g--) {
-    var gt = t - g * 0.028;
-    if (gt < 0) continue;
-    var gy2 = GROUND_Y - PLAYER - jumpOffset(gt);
-    ctx.fillStyle = 'rgba(0, 245, 212, ' + (0.05 + (6 - g) * 0.02) + ')';
-    ctx.fillRect(PLAYER_X - g * 7, gy2, PLAYER, PLAYER);
-  }
-
-  // player: glowing neon square with a bright core
-  var py = GROUND_Y - PLAYER - jumpOffset(t);
-  ctx.shadowColor = '#00f5d4';
-  ctx.shadowBlur = 34;
-  ctx.fillStyle = '#00f5d4';
-  ctx.fillRect(PLAYER_X, py, PLAYER, PLAYER);
-  ctx.shadowBlur = 0;
-  ctx.fillStyle = '#eafffb';
-  ctx.fillRect(PLAYER_X + 22, py + 22, PLAYER - 44, PLAYER - 44);
-
   ctx.restore();
 
-  // HUD: score pill + coin counter
-  var score = Math.floor(t * 12) + collected * 50;
-  ctx.fillStyle = 'rgba(13, 2, 33, 0.72)';
+  // two skyline layers drifting slower than the run
+  paintSkyline(farSkyline, scrolled * 0.25, '#141d47', false);
+  paintSkyline(nearSkyline, scrolled * 0.5, '#0a1130', true);
+
+  // ground slab and its scrolling grid
+  ctx.fillStyle = '#070714';
+  ctx.fillRect(0, GROUND_Y, VIEW_W, VIEW_H - GROUND_Y);
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.20)';
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.roundRect(36, 44, 430, 104, 52);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0, 245, 212, 0.8)';
-  ctx.lineWidth = 3;
+  var tick = -(scrolled % 120);
+  for (i = 0; i <= VIEW_W / 120 + 1; i++) {
+    ctx.moveTo(tick + i * 120, GROUND_Y + 46);
+    ctx.lineTo(tick + i * 120 - 30, VIEW_H);
+  }
+  ctx.moveTo(0, GROUND_Y + 120); ctx.lineTo(VIEW_W, GROUND_Y + 120);
+  ctx.moveTo(0, GROUND_Y + 250); ctx.lineTo(VIEW_W, GROUND_Y + 250);
   ctx.stroke();
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 54px system-ui, sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText('SCORE ' + score, 72, 116);
-  ctx.fillStyle = '#ffd319';
+
+  // the neon edge the runner actually lands on
+  ctx.save();
+  ctx.shadowColor = '#22d3ee';
+  ctx.shadowBlur = 22;
+  ctx.fillStyle = '#67e8f9';
+  ctx.fillRect(0, GROUND_Y - 4, VIEW_W, 5);
+  ctx.restore();
+
+  // coins still on the line, bobbing gently
+  for (i = 0; i < coinLine.length; i++) {
+    if (coinCollected(coinLine[i], t)) continue;
+    sx = coinLine[i].x - scrolled;
+    if (sx < -60 || sx > VIEW_W + 60) continue;
+    var bob = Math.sin(t / 280 + coinLine[i].x) * 6;
+    ctx.save();
+    ctx.shadowColor = '#facc15';
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = '#ffd94d';
+    ctx.beginPath();
+    ctx.arc(sx, coinLine[i].y + bob, 16, 0, 7);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff3c4';
+    ctx.beginPath();
+    ctx.arc(sx, coinLine[i].y + bob, 8, 0, 7);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // blocks, restyled as neon hazards — cyan and magenta in turn
+  for (i = 0; i < blocks.length; i++) {
+    sx = blocks[i].x - scrolled;
+    if (sx < -120 || sx > VIEW_W + 120) continue;
+    var neon = i % 2 ? '#e879f9' : '#22d3ee';
+    var blockGrad = ctx.createLinearGradient(0, GROUND_Y - blocks[i].h, 0, GROUND_Y);
+    blockGrad.addColorStop(0, '#221243');
+    blockGrad.addColorStop(1, '#0d0721');
+    ctx.save();
+    ctx.shadowColor = neon;
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = blockGrad;
+    ctx.fillRect(sx, GROUND_Y - blocks[i].h, blocks[i].w, blocks[i].h);
+    ctx.strokeStyle = neon;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(sx, GROUND_Y - blocks[i].h, blocks[i].w, blocks[i].h);
+    ctx.restore();
+  }
+
+  paintLandingSparks(t);
+
+  // motion ghosts behind the runner
+  var heroHeight = jumpHeightAt(t);
+  var heroTop = GROUND_Y - heroHeight - HERO_H;
+  for (i = 3; i >= 1; i--) {
+    ctx.globalAlpha = 0.10 * (4 - i);
+    ctx.fillStyle = '#d946ef';
+    ctx.fillRect(HERO_X - i * 30, heroTop + i * 3, HERO_W, HERO_H);
+  }
+  ctx.globalAlpha = 1;
+
+  // the runner: gradient body, glowing outline, visor, working legs
+  ctx.save();
+  ctx.shadowColor = '#e879f9';
+  ctx.shadowBlur = 26;
+  var bodyGrad = ctx.createLinearGradient(0, heroTop, 0, heroTop + HERO_H);
+  bodyGrad.addColorStop(0, '#ff4ecd');
+  bodyGrad.addColorStop(1, '#7c3aed');
+  ctx.fillStyle = bodyGrad;
   ctx.beginPath();
-  ctx.arc(540, 96, 30, 0, Math.PI * 2);
+  ctx.roundRect(HERO_X, heroTop, HERO_W, HERO_H, 14);
   ctx.fill();
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText('× ' + collected, 590, 116);
+  ctx.restore();
+  ctx.fillStyle = '#a5f3fc';
+  ctx.beginPath();
+  ctx.roundRect(HERO_X + 30, heroTop + 18, 26, 12, 6);
+  ctx.fill();
+  ctx.fillStyle = '#2e1065';
+  var airborne = heroHeight > 4;
+  var step = Math.floor(t / 90) % 2;
+  var legA = airborne ? 16 : (step ? 26 : 12);
+  var legB = airborne ? 16 : (step ? 12 : 26);
+  ctx.fillRect(HERO_X + 9, heroTop + HERO_H - legA, 14, legA);
+  ctx.fillRect(HERO_X + HERO_W - 23, heroTop + HERO_H - legB, 14, legB);
+
+  // HUD: score and distance up top, coin tally under the score
+  var taken = 0;
+  for (i = 0; i < coinLine.length; i++) if (coinCollected(coinLine[i], t)) taken++;
+  var score = Math.floor(scrolled / 8) + taken * 25;
+  ctx.font = '700 46px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#e0f2fe';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE ' + String(score).padStart(6, '0'), 36, 84);
+  ctx.textAlign = 'right';
+  ctx.fillText(Math.floor(scrolled / 50) + ' m', VIEW_W - 36, 84);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffd94d';
+  ctx.beginPath();
+  ctx.arc(54, 140, 14, 0, 7);
+  ctx.fill();
+  ctx.fillStyle = '#fef9c3';
+  ctx.fillText('x ' + taken, 82, 156);
+
+  // thin progress bar under the HUD: share of the course already run
+  var courseEnd = blocks[blocks.length - 1].x + 600;
+  ctx.fillStyle = 'rgba(224, 242, 254, 0.18)';
+  ctx.fillRect(36, 196, VIEW_W - 72, 8);
+  ctx.fillStyle = '#22d3ee';
+  ctx.fillRect(36, 196, (VIEW_W - 72) * Math.min(1, scrolled / courseEnd), 8);
 }
 
-window.renderAt = renderAt;
-renderAt(0);
-
-// free-run mode for opening the file by hand: ?play=1
-if (location.search.indexOf('play=1') >= 0) {
-  var t0 = performance.now();
-  (function loop() {
-    renderAt(performance.now() - t0);
-    requestAnimationFrame(loop);
-  })();
-}
+window.renderAt = function (ms) { drawFrame(Math.max(0, ms)); };
+window.renderAt(0);
 </script>
 </body>
 </html>

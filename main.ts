@@ -1,45 +1,45 @@
-// Entry program for the "Day One, Day Seven" TikTok bounty (Node 22, stdlib only).
+// Neon Dash — hand-in program for the day-one/day-seven bounty.
 //
-// The entry itself is the video: it lives on TikTok, and this repository only
-// has to hand its address to the grader. So this program does one thing —
-// copy VIDEO.json from the repository root into the output directory,
-// where the gate reads it. Before copying, it sanity-checks that the file
-// parses and actually carries a url, so a broken hand-in fails loudly here
-// instead of silently at grading time.
+// Reads the VIDEO.json sitting next to this file, checks that its "url"
+// is a complete TikTok video address, and copies the file verbatim to
+// /output/VIDEO.json. Any problem (missing file, bad JSON, wrong URL
+// shape) exits non-zero with the reason on stderr.
 //
-// Local dry run (mirrors the grader's environment variables):
-//   mkdir -p out && MAKEFUN_BOT_DIR=. MAKEFUN_OUTPUT_DIR=out node main.ts
+// Node 22+, standard library only.
 
-import { copyFileSync, mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const botDir = process.env.MAKEFUN_BOT_DIR ?? '/bot';
-const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+function fail(message) {
+  console.error("main.ts: " + message);
+  process.exit(1);
+}
 
-const source = join(botDir, 'VIDEO.json');
-const target = join(outputDir, 'VIDEO.json');
+const here = dirname(fileURLToPath(import.meta.url));
+const sourcePath = join(here, "VIDEO.json");
 
-let parsed: unknown;
+let raw;
 try {
-  parsed = JSON.parse(readFileSync(source, 'utf8'));
-} catch (err) {
-  console.error(`VIDEO.json is missing or unreadable at ${source}: ${(err as Error).message}`);
-  process.exit(1);
+  raw = readFileSync(sourcePath);
+} catch {
+  fail("cannot read " + sourcePath);
 }
 
-const url = (parsed as { url?: unknown }).url;
-if (typeof url !== 'string' || url.length === 0) {
-  console.error('VIDEO.json must be an object with a non-empty "url" string.');
-  process.exit(1);
+let parsed;
+try {
+  parsed = JSON.parse(raw.toString("utf8"));
+} catch {
+  fail("VIDEO.json is not valid JSON");
 }
 
-// The gate only accepts a full TikTok video address — short share links
-// (vm.tiktok.com, vt.tiktok.com, tiktok.com/t/...) and the starter's
-// placeholder are refused — so reject those shapes here, at hand-in time.
-if (!/^https:\/\/www\.tiktok\.com\/@[^/]+\/video\/\d+$/.test(url)) {
-  console.error(`VIDEO.json url is not a full TikTok video address: ${url}`);
-  process.exit(1);
+const url = parsed && parsed.url;
+// A full address only: scheme, www.tiktok.com, an @handle, /video/, digits.
+const ADDRESS = /^https:\/\/www\.tiktok\.com\/@[A-Za-z0-9._-]+\/video\/\d+$/;
+if (typeof url !== "string" || !ADDRESS.test(url)) {
+  fail('"url" must look like https://www.tiktok.com/@handle/video/1234567890');
 }
 
-mkdirSync(outputDir, { recursive: true });
-copyFileSync(source, target);
+mkdirSync("/output", { recursive: true });
+writeFileSync("/output/VIDEO.json", raw);
+console.log("handed in " + url);

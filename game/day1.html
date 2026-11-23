@@ -1,104 +1,143 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Neon Dash — Day 1 build</title>
+<title>Neon Dash — Day 1 prototype</title>
 <style>
-  html, body { margin: 0; padding: 0; background: #888; }
+  html, body { margin: 0; padding: 0; background: #000; }
   canvas { display: block; }
 </style>
 </head>
 <body>
-<canvas id="game" width="1080" height="1920"></canvas>
+<canvas id="view" width="1080" height="1920"></canvas>
 <script>
 'use strict';
-// NEON DASH — day 1 build.
-// One-button endless runner, autopilot demo. Everything on screen is a pure
-// function of elapsed time (renderAt), so a capture script can step it
-// frame by frame and always get the same picture.
+/*
+ * Neon Dash, day 1: the first working build. One button, endless track,
+ * grey boxes on grey sky. The world below (seed, obstacles, jump timing)
+ * is the exact same world the day-7 build runs in — only the paint job
+ * and the extras differ.
+ *
+ * Everything is a pure function of the time offset handed to
+ * window.renderAt(ms): no wall clock, no Math.random, so a frame can be
+ * re-rendered identically at any moment.
+ */
 
-var W = 1080, H = 1920;
-var GROUND_Y = 1560;          // top edge of the ground
-var PLAYER_X = 250, PLAYER = 92;
-var SPEED = 640;              // px per second, world scroll
-var JUMP_D = 0.66, JUMP_H = 300;
+// ---------- shared world model ----------
+var VIEW_W = 1080, VIEW_H = 1920;
+var GROUND_Y = 1560;              // y of the track surface
+var RUN_SPEED = 520;              // pixels per second
+var HERO_X = 300, HERO_W = 64, HERO_H = 92;
 
+// Small deterministic PRNG (mulberry32) so the course is built once,
+// identically, on every load.
 function mulberry32(seed) {
   var a = seed >>> 0;
   return function () {
-    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    a = (a + 0x6D2B79F5) | 0;
     var t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-// ---- world generation (shared verbatim with the day 7 build) ----
-var obstacles = [];
-var jumpTimes = [];
-(function buildWorld() {
-  var rng = mulberry32(1337);
-  var x = 1500;
+var dice = mulberry32(1337);
+
+// The course: 26 blocks. Positions and sizes come from the seeded dice.
+var blocks = [];
+(function buildCourse() {
+  var cursor = 1500;
   for (var i = 0; i < 26; i++) {
-    var h = 96 + rng() * 70;
-    obstacles.push({ x: x, w: 84, h: h });
-    jumpTimes.push((x - (PLAYER_X + PLAYER + 300)) / SPEED);
-    x += 760 + rng() * 420;
+    blocks.push({
+      x: cursor,
+      w: 46 + Math.floor(dice() * 26),
+      h: 44 + Math.floor(dice() * 66)
+    });
+    cursor += 400 + Math.floor(dice() * 240);
   }
 })();
 
-function jumpOffset(t) {
-  for (var i = 0; i < jumpTimes.length; i++) {
-    var s = (t - jumpTimes[i]) / JUMP_D;
-    if (s >= 0 && s <= 1) return 4 * JUMP_H * s * (1 - s);
+// Coin line for the shared world. Day 1 never paints them (no coin
+// system yet), but the layout is part of the course definition.
+var coinLine = [];
+for (var ci = 0; ci < 34; ci++) {
+  coinLine.push({
+    x: 900 + ci * 185 + Math.floor(dice() * 70),
+    y: GROUND_Y - 150 - Math.floor(dice() * 160)
+  });
+}
+
+// Scripted jumps: the runner leaves the ground a fixed lead distance
+// before each block, so the same run clears the same blocks every time.
+var JUMP_MS = 640, JUMP_TOP = 250, JUMP_LEAD = 170;
+var jumpStarts = blocks.map(function (b) {
+  return (b.x - HERO_X - HERO_W - JUMP_LEAD) / RUN_SPEED * 1000;
+});
+
+function jumpHeightAt(t) {
+  for (var i = 0; i < jumpStarts.length; i++) {
+    var p = (t - jumpStarts[i]) / JUMP_MS;
+    if (p >= 0 && p <= 1) {
+      var q = 2 * p - 1;
+      return JUMP_TOP * (1 - q * q);
+    }
   }
   return 0;
 }
 
-var ctx = document.getElementById('game').getContext('2d');
+function scrolledAt(t) { return RUN_SPEED * t / 1000; }
 
-function renderAt(ms) {
-  var t = ms / 1000;
-  // flat grey sky
-  ctx.fillStyle = '#9a9a9a';
-  ctx.fillRect(0, 0, W, H);
-  // ground
-  ctx.fillStyle = '#6f6f6f';
-  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
-  ctx.fillStyle = '#e8e8e8';
-  ctx.fillRect(0, GROUND_Y, W, 6);
-  // obstacles: plain dark boxes
-  ctx.fillStyle = '#4d4d4d';
-  for (var i = 0; i < obstacles.length; i++) {
-    var ox = obstacles[i].x - SPEED * t;
-    if (ox < -120 || ox > W + 120) continue;
-    ctx.fillRect(ox, GROUND_Y - obstacles[i].h, obstacles[i].w, obstacles[i].h);
+// ---------- day 1 rendering: flat and grey ----------
+var ctx = document.getElementById('view').getContext('2d');
+
+function drawFrame(t) {
+  var scrolled = scrolledAt(t);
+  var i, sx;
+
+  // sky
+  ctx.fillStyle = '#8f8f8f';
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+  // one flat circle pretending to be a sun
+  ctx.fillStyle = '#d8d8d8';
+  ctx.beginPath();
+  ctx.arc(880, 250, 90, 0, 7);
+  ctx.fill();
+
+  // ground slab with a lighter edge line
+  ctx.fillStyle = '#737373';
+  ctx.fillRect(0, GROUND_Y, VIEW_W, VIEW_H - GROUND_Y);
+  ctx.fillStyle = '#a6a6a6';
+  ctx.fillRect(0, GROUND_Y, VIEW_W, 8);
+
+  // blocks: plain dark rectangles
+  ctx.fillStyle = '#454545';
+  for (i = 0; i < blocks.length; i++) {
+    sx = blocks[i].x - scrolled;
+    if (sx < -120 || sx > VIEW_W + 120) continue;
+    ctx.fillRect(sx, GROUND_Y - blocks[i].h, blocks[i].w, blocks[i].h);
   }
-  // player: plain light box
-  var py = GROUND_Y - PLAYER - jumpOffset(t);
-  ctx.fillStyle = '#d9d9d9';
-  ctx.fillRect(PLAYER_X, py, PLAYER, PLAYER);
-  ctx.strokeStyle = '#555';
-  ctx.lineWidth = 4;
-  ctx.strokeRect(PLAYER_X, py, PLAYER, PLAYER);
-  // score, plain text
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '48px monospace';
-  ctx.textAlign = 'left';
-  ctx.fillText('SCORE ' + Math.floor(t * 12), 40, 90);
+
+  // the runner: one dark box with a cap strip. That is the whole sprite.
+  var heroTop = GROUND_Y - jumpHeightAt(t) - HERO_H;
+  ctx.fillStyle = '#26262b';
+  ctx.fillRect(HERO_X, heroTop, HERO_W, HERO_H);
+  ctx.fillStyle = '#3d3d44';
+  ctx.fillRect(HERO_X, heroTop, HERO_W, 14);
+
+  // legs: darker stubs inside the box, swapping length on a step
+  // timer (frozen mid-jump) — the fanciest animation day 1 could afford
+  var air = jumpHeightAt(t) > 4;
+  var step = Math.floor(t / 110) % 2;
+  var legA = air ? 15 : (step ? 25 : 12);
+  var legB = air ? 15 : (step ? 12 : 25);
+  ctx.fillStyle = '#17171b';
+  ctx.fillRect(HERO_X + 8, heroTop + HERO_H - legA, 13, legA);
+  ctx.fillRect(HERO_X + HERO_W - 21, heroTop + HERO_H - legB, 13, legB);
 }
 
-window.renderAt = renderAt;
-renderAt(0);
-
-// free-run mode for opening the file by hand: ?play=1
-if (location.search.indexOf('play=1') >= 0) {
-  var t0 = performance.now();
-  (function loop() {
-    renderAt(performance.now() - t0);
-    requestAnimationFrame(loop);
-  })();
-}
+window.renderAt = function (ms) { drawFrame(Math.max(0, ms)); };
+window.renderAt(0);
 </script>
 </body>
 </html>
